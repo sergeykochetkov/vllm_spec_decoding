@@ -77,6 +77,11 @@ class PrefillTop1Scorer(SpeculativeScorer):
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
+        batch_size=len(proposal_token_ids_list)
+        num_spec_tokens=proposal_lens_list[0]
+        for l in proposal_lens_list:
+            assert l==num_spec_tokens, "only equal num of spec tokens in batch is supported"
+
         # Filter the list to ignore -1 proposals.
         proposal_token_ids_list_without_skips = [
             proposals for proposals in proposal_token_ids_list if -1 not in proposals
@@ -132,22 +137,20 @@ class PrefillTop1Scorer(SpeculativeScorer):
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 
-        # TODO
-        num_spec_tokens = len(proposal_token_ids_list_without_skips[0])
+        all_probs = target_sampler_output.sampled_token_probs.reshape(batch_size, 1+num_spec_tokens,-1)
 
-        all_probs = target_sampler_output.sampled_token_probs[
-            -(1 + num_spec_tokens) :, :
-        ]
-
-        all_probs.unsqueeze_(0)
         all_tokens = all_probs.argmax(dim=-1)
 
-        all_probs = torch.zeros_like(all_probs)
+        #all_probs = torch.zeros_like(all_probs)
         # TODO refactor
-        for i, t in enumerate(all_tokens[0]):
-            all_probs[0, i, t] = 1.0
+        '''
+        for b in range(len(all_tokens)):
+            for i, t in enumerate(all_tokens[b]):
+                all_probs[b, i, t] = 1.0
+        '''
+        batch_indices = torch.arange(batch_size).unsqueeze(1).expand_as(all_tokens)
+        all_probs[batch_indices, torch.arange(all_tokens.size(1)), all_tokens] = 1.0
 
-        # all_probs.max(dim=-1) must be 1.0 here
 
         spec_logprobs = torch.log(1e-6 + all_probs)
 

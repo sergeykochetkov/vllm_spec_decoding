@@ -265,7 +265,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._metrics.init_gpu_tensors(self.rank)
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
 
-        # cls_name = BatchExpansionTop1Scorer
+        #cls_name = BatchExpansionTop1Scorer
         cls_name = PrefillTop1Scorer
 
         self.scorer = cls_name(
