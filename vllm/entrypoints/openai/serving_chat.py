@@ -10,6 +10,7 @@ from transformers import PreTrainedTokenizer
 from vllm.config import ModelConfig
 from vllm.engine.protocol import AsyncEngineClient
 from vllm.entrypoints.chat_utils import (ConversationMessage,
+                                         apply_chat_template,
                                          load_chat_template,
                                          parse_chat_messages)
 from vllm.entrypoints.logger import RequestLogger
@@ -82,6 +83,16 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if request.prompt_logprobs is not None:
+            if request.stream and request.prompt_logprobs > 0:
+                return self.create_error_response(
+                    "Prompt_logprobs are not available when stream is enabled")
+
+            if request.prompt_logprobs < 0:
+                return self.create_error_response(
+                    f"Prompt_logprobs set to invalid "
+                    f"negative value: {request.prompt_logprobs}")
+
         try:
             (
                 lora_request,
@@ -99,16 +110,15 @@ class OpenAIServingChat(OpenAIServing):
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt = tokenizer.apply_chat_template(
+            prompt = apply_chat_template(
+                tokenizer,
                 conversation=conversation,
-                tokenize=False,
+                chat_template=request.chat_template or self.chat_template,
                 add_generation_prompt=request.add_generation_prompt,
                 tools=tool_dicts,
                 documents=request.documents,
-                chat_template=request.chat_template or self.chat_template,
                 **(request.chat_template_kwargs or {}),
             )
-            assert isinstance(prompt, str)
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
@@ -506,6 +516,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            prompt_logprobs=final_res.prompt_logprobs,
         )
 
         return response
