@@ -93,32 +93,34 @@ class PrefillTop1Scorer(SpeculativeScorer):
         ):
             _seq_group_metadata = deepcopy(seq_group_metadata)
             _seq_data = {}
+            max_input_seq_id=max(_seq_group_metadata.seq_data.keys())
             for k, v in _seq_group_metadata.seq_data.items():
                 prompt_token_ids = list(v.prompt_token_ids)
 
                 prompt_token_ids.extend(v.output_token_ids)
 
-                # we need to compute the last output token
+                # we need to compute the last output token ?
                 num_computed_tokens = len(prompt_token_ids) - 1
+                #num_computed_tokens = v.get_num_computed_tokens() # Why this does not work?
 
                 prompt_token_ids.extend(proposal_token_ids_list_without_skips[i])
                 v.prompt_token_ids = prompt_token_ids
                 v.output_token_ids = []
                 # v.stage = SequenceStage.PREFILL
-                # num_computed_tokens = v.get_num_computed_tokens()
+                
                 v.reset_state_for_recompute()
                 v.update_num_computed_tokens(num_computed_tokens)
 
-                _seq_data[k] = v
-                # _seq_data[k].update_num_computed_tokens(num_computed_tokens)
+                _seq_data[k+max_input_seq_id] = v
+                
 
             _seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group_metadata.request_id,
                 is_prompt=True,
                 seq_data=_seq_data,
                 sampling_params=seq_group_metadata.sampling_params,
-                block_tables=seq_group_metadata.block_tables,
-                do_sample=seq_group_metadata.do_sample,
+                block_tables={k+max_input_seq_id:v for k,v in seq_group_metadata.block_tables.items()},
+                do_sample=False, #seq_group_metadata.do_sample,
                 pooling_params=seq_group_metadata.pooling_params,
                 token_chunk_size=len(prompt_token_ids) - num_computed_tokens,
             )
@@ -141,13 +143,6 @@ class PrefillTop1Scorer(SpeculativeScorer):
 
         all_tokens = all_probs.argmax(dim=-1)
 
-        #all_probs = torch.zeros_like(all_probs)
-        # TODO refactor
-        '''
-        for b in range(len(all_tokens)):
-            for i, t in enumerate(all_tokens[b]):
-                all_probs[b, i, t] = 1.0
-        '''
         batch_indices = torch.arange(batch_size).unsqueeze(1).expand_as(all_tokens)
         all_probs[batch_indices, torch.arange(all_tokens.size(1)), all_tokens] = 1.0
 

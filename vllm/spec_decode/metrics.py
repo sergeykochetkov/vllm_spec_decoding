@@ -166,7 +166,7 @@ class AsyncMetricsCollector:
         else:
             system_efficiency = float("nan")
 
-        metrics = SpecDecodeWorkerMetrics(
+        return SpecDecodeWorkerMetrics(
             num_spec_tokens=k,
             draft_acceptance_rate=draft_acceptance_rate,
             system_efficiency=system_efficiency,
@@ -174,10 +174,6 @@ class AsyncMetricsCollector:
             draft_tokens=draft_tokens,
             emitted_tokens=emitted_tokens,
         )
-
-        print(metrics)
-
-        return metrics
         
 
     @staticmethod
