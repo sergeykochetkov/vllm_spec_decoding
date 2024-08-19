@@ -106,7 +106,6 @@ class PrefillTop1Scorer(SpeculativeScorer):
                 prompt_token_ids.extend(proposal_token_ids_list_without_skips[i])
                 v.prompt_token_ids = prompt_token_ids
                 v.output_token_ids = []
-                # v.stage = SequenceStage.PREFILL
                 
                 v.reset_state_for_recompute()
                 v.update_num_computed_tokens(num_computed_tokens)
@@ -120,7 +119,7 @@ class PrefillTop1Scorer(SpeculativeScorer):
                 seq_data=_seq_data,
                 sampling_params=seq_group_metadata.sampling_params,
                 block_tables={k+max_input_seq_id:v for k,v in seq_group_metadata.block_tables.items()},
-                do_sample=False, #seq_group_metadata.do_sample,
+                do_sample=False,
                 pooling_params=seq_group_metadata.pooling_params,
                 token_chunk_size=len(prompt_token_ids) - num_computed_tokens,
             )
@@ -156,198 +155,6 @@ class PrefillTop1Scorer(SpeculativeScorer):
             hidden_states=target_sampler_output.hidden_states,
         )
 
-    def _create_scoring_model_input(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
-        target_seq_ids_iter: Iterator[TargetSeqId],
-    ) -> List[SequenceGroupMetadata]:
-        """Given the original input sequences and proposed tokens from the draft
-        model, create a list of target sequences that can be used for scoring.
-
-        target_seq_ids_iter provides sequence ids for the expanded batch,
-        fulfilling the requirement that no seq id in the expanded batch is equal
-        to the seq id in the original batch.
-        """
-
-        if not seq_group_metadata_list:
-            return []
-
-        target_seq_group_metadata = list(
-            chain.from_iterable(
-                self._create_target_seq_group_metadata(
-                    seq_group_metadata,
-                    proposal_token_ids,
-                    i,
-                    target_seq_ids_iter,
-                )
-                for i, seq_group_metadata in enumerate(seq_group_metadata_list)
-            )
-        )
-
-        return target_seq_group_metadata
-
-    def _create_target_seq_group_metadata(
-        self,
-        input_seq_group_metadata: SequenceGroupMetadata,
-        proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
-        batch_index: int,
-        target_seq_ids_iter: Iterator[TargetSeqId],
-    ) -> List[SequenceGroupMetadata]:
-        """Given an input sequence group metadata and a list of draft tokens,
-        create a list of target SequenceGroupMetadata, one for each
-        token id that needs to be scored.
-
-        Naive speculative decoding requires K target model scores, one for each
-        draft model token. However one can add a bonus token such that if each
-        token is accepted, then a final token may be sampled from the model.
-        This function creates K+1 target SequenceGroupMetadata to take
-        advantage of the bonus token.
-        """
-        assert not input_seq_group_metadata.is_prompt, (
-            "Speculating on " "prompts not yet supported"
-        )
-        assert len(input_seq_group_metadata.seq_data) == 1, (
-            "Beam search " "not supported in speculative decoding"
-        )
-        input_seq_id = next(iter(input_seq_group_metadata.seq_data.keys()))
-
-        token_ids_to_score = self._get_token_ids_to_score(
-            proposal_token_ids[batch_index]
-        )
-
-        target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        for token_ids in token_ids_to_score:
-            target_seq_group_metadata_list.append(
-                self._create_single_target_seq_group_metadata(
-                    input_seq_group_metadata,
-                    input_seq_id,
-                    next(target_seq_ids_iter),
-                    token_ids,
-                )
-            )
-
-        return target_seq_group_metadata_list
-
-    def _create_single_target_seq_group_metadata(
-        self,
-        seq_group_metadata: SequenceGroupMetadata,
-        seq_id: SeqId,
-        target_seq_id: TargetSeqId,
-        token_ids: List[TokenId],
-    ) -> SequenceGroupMetadata:
-        """Create a single target SequenceGroupMetadata.
-
-        Args:
-            seq_group_metadata: The metadata for the input sequence.
-            seq_id: The input sequence ID.
-            target_seq_id: The corresponding target sequence ID.
-            token_ids: The list of token ids that are to be appended to the
-                input sequence.
-        """
-        seq_data = seq_group_metadata.seq_data[seq_id]
-        prompt_token_ids = seq_data.get_prompt_token_ids()
-        new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
-
-        new_seq_data_dict = {
-            target_seq_id: SequenceData(
-                prompt_token_ids=prompt_token_ids,
-                output_token_ids=new_output_token_ids,
-            ),
-        }
-        # This is a hack. Technically, spec decoding should compute
-        # num_lookahead slots at one shot, but instead, it expands the batch
-        # and evaluate one by one right now. context_len is seq_len - 1 because
-        # the kv cache is filled by a previous batch in the batch expansion.
-        for data in new_seq_data_dict.values():
-            data.update_num_computed_tokens(data.get_len() - 1)
-
-        if (
-            seq_group_metadata.state is not None
-            and seq_group_metadata.state.generator is not None
-        ):
-            generator = torch.Generator(
-                device=seq_group_metadata.state.generator.device
-            )
-            generator.set_state(seq_group_metadata.state.generator.get_state())
-            state = SequenceGroupState(generator=generator)
-        else:
-            state = None
-
-        return SequenceGroupMetadata(
-            request_id=seq_group_metadata.request_id,
-            is_prompt=seq_group_metadata.is_prompt,
-            seq_data=new_seq_data_dict,
-            sampling_params=seq_group_metadata.sampling_params,
-            block_tables={
-                target_seq_id: seq_group_metadata.block_tables[seq_id],
-            },
-            lora_request=None,
-            token_chunk_size=1,
-            state=state,
-        )
-
-    def _split_scoring_output(
-        self, sampler_output: SamplerOutput, num_scoring_tokens: int
-    ) -> Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        """Split the target model output into speculative and non-speculative
-        output.
-        """
-
-        # vLLM currently only supports proposal lens equal to zero or the batch
-        # proposal len. This adds some complexity (splitting the batch into spec
-        # and non spec sequences) and should be removed in the future. It can be
-        # done by supporting per-sequence proposal lens.
-        #
-        # First samples are from speculative scoring, latter samples are non-
-        # speculative samples.
-        split_sizes = [
-            num_scoring_tokens,
-            sampler_output.sampled_token_ids.numel() - num_scoring_tokens,
-        ]
-        (spec_probs, non_spec_probs) = sampler_output.sampled_token_probs.split(
-            split_sizes
-        )
-        (spec_sampled_tokens, non_spec_sampled_tokens) = (
-            sampler_output.sampled_token_ids.flatten().split(split_sizes)
-        )
-        (
-            spec_logprobs,
-            non_spec_logprobs,
-        ) = sampler_output.logprobs.split(split_sizes)
-
-        # Convert scores to tensors.
-        sampler_output.sampled_token_probs = spec_probs
-        sampler_output.sampled_token_ids = spec_sampled_tokens
-        sampler_output.logprobs = spec_logprobs
-        (target_token_ids, target_probs, target_logprobs) = sampler_output_to_torch(
-            [sampler_output], True
-        )
-
-        # Convert non-speculative output tokens to tensors.
-        sampler_output.sampled_token_probs = non_spec_probs
-        sampler_output.sampled_token_ids = non_spec_sampled_tokens
-        sampler_output.logprobs = non_spec_logprobs
-        (non_spec_target_token_ids, non_spec_target_probs, non_spec_target_logprobs) = (
-            sampler_output_to_torch([sampler_output], True)
-        )
-
-        return (
-            target_token_ids,
-            target_probs,
-            target_logprobs,
-            non_spec_target_token_ids,
-            non_spec_target_probs,
-            non_spec_target_logprobs,
-        )
-
     def _create_target_seq_id_iterator(
         self, seq_ids: List[SeqId]
     ) -> Iterator[TargetSeqId]:
@@ -359,29 +166,3 @@ class PrefillTop1Scorer(SpeculativeScorer):
         provided input sequence ids.
         """
         return count(start=max(seq_ids) + 1)
-
-    def _get_token_ids_to_score(
-        self, full_spec_token_ids: List[TokenId]  # shape: [k]
-    ) -> List[List[TokenId]]:
-        """Given an int tensor of proposal token ids, return a list of
-        token ids that should be scored.
-
-        Returns k+1 output lists. The additional one is used for generating the
-        bonus token.
-
-        Example:
-            Input: [0, 1, 2, 3] (k=4)
-            Output: (k+1 lists)
-                []
-                [0]
-                [0, 1]
-                [0, 1, 2]
-                [0, 1, 2, 3]
-        """
-        empty_token_ids: List[TokenId] = []
-
-        token_ids_to_score = [empty_token_ids]
-        token_ids_to_score.extend(
-            [full_spec_token_ids[: i + 1] for i in range(len(full_spec_token_ids))]
-        )
-        return token_ids_to_score
