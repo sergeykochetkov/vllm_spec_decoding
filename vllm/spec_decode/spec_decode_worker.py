@@ -3,6 +3,7 @@ from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
+import torch.autograd.profiler as profiler
 
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
@@ -265,8 +266,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._metrics.init_gpu_tensors(self.rank)
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
 
-        #cls_name = BatchExpansionTop1Scorer
-        cls_name = PrefillTop1Scorer
+        cls_name = BatchExpansionTop1Scorer
+        #cls_name = PrefillTop1Scorer
 
         self.scorer = cls_name(
             scorer_worker=self.scorer_worker,
@@ -543,9 +544,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.previous_hidden_states = None
 
         with Timer() as proposal_timer:
-            # Generate proposals using draft worker.
-            proposals = self.proposer_worker.get_spec_proposals(
-                execute_model_req, self._seq_with_bonus_token_in_last_step)
+            with profiler.record_function("GENERATE_PROPOSALS"):
+                # Generate proposals using draft worker.
+                proposals = self.proposer_worker.get_spec_proposals(
+                    execute_model_req, self._seq_with_bonus_token_in_last_step)
 
         if not self._allow_zero_draft_token_step and proposals.no_proposals:
             #TODO: Fix it #5814
@@ -553,15 +555,17 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                "workers generate no tokens")
 
         with Timer() as scoring_timer:
-            proposal_scores = self.scorer.score_proposals(
-                execute_model_req,
-                proposals,
-            )
+            with profiler.record_function("SCORE_PROPOSALS"):
+                proposal_scores = self.scorer.score_proposals(
+                    execute_model_req,
+                    proposals,
+                )
 
         with Timer() as verification_timer:
-            accepted_token_ids, target_logprobs = self._verify_tokens(
-                execute_model_req.seq_group_metadata_list, proposal_scores,
-                proposals, execute_model_req.num_lookahead_slots)
+            with profiler.record_function("VERIFY_TOKENS"):
+                accepted_token_ids, target_logprobs = self._verify_tokens(
+                    execute_model_req.seq_group_metadata_list, proposal_scores,
+                    proposals, execute_model_req.num_lookahead_slots)
 
         stage_times = (proposal_timer.elapsed_time_ms / num_lookahead_slots,
                        scoring_timer.elapsed_time_ms,

@@ -73,6 +73,7 @@ def main(args: argparse.Namespace):
                         torch.profiler.ProfilerActivity.CPU,
                         torch.profiler.ProfilerActivity.CUDA,
                     ],
+                    with_stack=True,
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
                 llm.generate(dummy_inputs,

@@ -30,30 +30,6 @@ SeqId = int
 TargetSeqId = int
 TokenId = int
 
-class Measure:
-    def __init__(self, print_every: int):
-        self._n=0
-        self._values=None
-        self._print_every=print_every
-
-    def update(self, new_values:dict[str, float])->None:
-        
-        if self._values is None:
-            self._values=new_values
-        else:
-            assert len(set(new_values).symmetric_difference(self._values))==0, "all values updates must be specified"
-            for n,v in new_values.items():
-                self._values[n]+=v
-        self._n+=1
-
-        if self._values and self._n%self._print_every==0:
-            self._print()
-    
-    def _print(self):
-
-        for k,v in self._values.items():
-            print(f"{k}={v/self._n}")
-        print('')
 
 class PrefillTop1Scorer(SpeculativeScorer):
     """Implements a speculative scorer that uses batch expansion to get
@@ -74,8 +50,7 @@ class PrefillTop1Scorer(SpeculativeScorer):
         self._scorer_worker = scorer_worker
         self._device = device
         self._vocab_size = vocab_size
-        self._measure=Measure(print_every=50)
-
+        
     @nvtx_range("PrefillTop1Scorer.score_proposals")
     def score_proposals(
         self,
@@ -98,21 +73,15 @@ class PrefillTop1Scorer(SpeculativeScorer):
             SpeculativeScores: The scores of each speculative token, along with
                 which sequences were ignored during scoring.
         """
-        with Timer() as prepare_timer:
-            execute_model_req_prefill = self._prepare_inputs(execute_model_req, proposals)
+        
+        execute_model_req_prefill = self._prepare_inputs(execute_model_req, proposals)
 
-        with Timer() as execute_timer:
-            target_sampler_output = self._scorer_worker.execute_model(
-                execute_model_req=execute_model_req_prefill
-            )
+        target_sampler_output = self._scorer_worker.execute_model(
+            execute_model_req=execute_model_req_prefill
+        )
 
-        with Timer() as output_timer:
-            output, measure_update=self._prepare_outputs(proposals, target_sampler_output)
-            
-        update={"prepare": prepare_timer.elapsed_time_ms, "execute":execute_timer.elapsed_time_ms, "output":output_timer.elapsed_time_ms}
-        update.update(measure_update)
-        self._measure.update(update)
-
+        output=self._prepare_outputs(proposals, target_sampler_output)
+    
         return output
     
 
@@ -124,24 +93,20 @@ class PrefillTop1Scorer(SpeculativeScorer):
 
         all_probs = target_sampler_output.sampled_token_probs.reshape(batch_size, 1+num_spec_tokens,-1)
 
-        with Timer() as argmax_timer:
-            all_tokens = all_probs.argmax(dim=-1)
+        all_tokens = all_probs.argmax(dim=-1)
 
-        with Timer() as all_probs_timer:
-            batch_indices = torch.arange(batch_size).unsqueeze(1).expand_as(all_tokens)
-            all_probs[batch_indices, torch.arange(all_tokens.size(1)), all_tokens] = 1.0
+        batch_indices = torch.arange(batch_size).unsqueeze(1).expand_as(all_tokens)
+        
+        all_probs[batch_indices, torch.arange(all_tokens.size(1)), all_tokens] = 1.0
 
-        with Timer() as logprobs_timer:
-            spec_logprobs = torch.log(1e-6 + all_probs)
-
-        measure_update={"argmax": argmax_timer.elapsed_time_ms, "all_probs": all_probs_timer.elapsed_time_ms, "logprobs":logprobs_timer.elapsed_time_ms}
+        spec_logprobs = torch.log(all_probs)
 
         return SpeculativeScores(
             probs=all_probs,
             token_ids=all_tokens,
             logprobs=spec_logprobs,
             hidden_states=target_sampler_output.hidden_states,
-        ), measure_update
+        )
 
 
     def _prepare_inputs(self,execute_model_req: ExecuteModelRequest, proposals: SpeculativeProposals)->ExecuteModelRequest:
