@@ -1409,11 +1409,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     attn_metadata = self.attn_backend.make_metadata(
                         num_prefills=batch_size,
-                        num_prefill_tokens=num_tokens,
+                        num_prefill_tokens=num_tokens+1,
                         num_decode_tokens=0,
-                        slot_mapping=slot_mapping[:num_tokens],
-                        seq_lens=[self.max_seq_len_to_capture] * batch_size,
-                        seq_lens_tensor=seq_lens[:batch_size],
+                        slot_mapping=slot_mapping[:num_tokens+1],
+                        seq_lens=[self.max_seq_len_to_capture,1] * batch_size,
+                        seq_lens_tensor=seq_lens[:(batch_size+1)],
                         max_query_len=self.max_seq_len_to_capture,
                         max_prefill_seq_len=self.max_seq_len_to_capture,
                         max_decode_seq_len=0,
@@ -1429,9 +1429,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     capture_inputs = {
                         "input_ids":
-                        input_tokens[:(num_tokens)],# plus dymme token for bonus token generation
+                        input_tokens[:(num_tokens+1)],# plus dymme token for bonus token generation
                         "positions":
-                        input_positions[:num_tokens],
+                        input_positions[:(num_tokens+1)],
                         "hidden_or_intermediate_states":
                         hidden_or_intermediate_states[
                             virtual_engine]  # type: ignore
@@ -1450,6 +1450,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "stream":
                         graph_capture_context.stream
                     }
+                    print(f"{capture_inputs=}")
                     graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool() #TODO Do Not override decodeing cuda graph pool
                     self.graph_runners_prefill[virtual_engine][batch_size] = (
@@ -1826,12 +1827,25 @@ class CUDAGraphRunner:
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
         if self.backend_name != "flashinfer":
+
+            #TODO refactor move to Metadata class
+            if attn_metadata.decode_metadata:
+                seq_lens_tensor=attn_metadata.decode_metadata.seq_lens_tensor
+                block_tables=attn_metadata.decode_metadata.block_tables
+            else:
+                seq_lens_tensor=attn_metadata.prefill_metadata.seq_lens_tensor
+                block_tables=attn_metadata.prefill_metadata.block_tables
+
             self.input_buffers["seq_lens_tensor"].copy_(
-                attn_metadata.seq_lens_tensor, #TODO attn_metadata.decode_metadata
+                seq_lens_tensor, 
                 non_blocking=True)
             self.input_buffers["block_tables"].copy_(
-                attn_metadata.block_tables,  #TODO attn_metadata.decode_metadata
+                block_tables,
                 non_blocking=True)
+            
+            if False:#not attn_metadata.decode_metadata:
+                print(f"{self.input_buffers=}")
+
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
