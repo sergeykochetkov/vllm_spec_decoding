@@ -641,6 +641,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def _use_captured_graph(self, batch_size: int,
                             max_decode_seq_len: int) -> bool:
+        #TODO dirty hack
+        if (not self.decode_only) and (max_decode_seq_len==0) and (batch_size==3):
+            return True
         return (self.decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
                 and max_decode_seq_len <= self.runner.max_seq_len_to_capture)
@@ -834,6 +837,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
+
+        self.graph_runners_prefill: List[Dict[int, CUDAGraphRunner]] = [
+            {} for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
 
@@ -1286,7 +1294,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         query_start_loc_host = torch.arange(0,
                                                             batch_size + 1,
                                                             dtype=torch.int32)
-
+                        
                         attn_metadata = self.attn_backend.make_metadata(
                             num_prefills=0,
                             slot_mapping=slot_mapping[:batch_size],
@@ -1390,6 +1398,65 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
+            
+                        # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
+            for virtual_engine in range(
+                    self.parallel_config.pipeline_parallel_size):
+                for batch_size in [1]:
+                    num_prefill_tokens = 3
+                    num_tokens = batch_size * num_prefill_tokens
+
+                    attn_metadata = self.attn_backend.make_metadata(
+                        num_prefills=batch_size,
+                        num_prefill_tokens=num_tokens,
+                        num_decode_tokens=0,
+                        slot_mapping=slot_mapping[:num_tokens],
+                        seq_lens=[self.max_seq_len_to_capture] * batch_size,
+                        seq_lens_tensor=seq_lens[:batch_size],
+                        max_query_len=self.max_seq_len_to_capture,
+                        max_prefill_seq_len=self.max_seq_len_to_capture,
+                        max_decode_seq_len=0,
+                        query_start_loc=torch.tensor([0, 3], device='cuda:0', dtype=torch.int32), 
+                        seq_start_loc=torch.tensor([  0, 259], device='cuda:0', dtype=torch.int32), 
+                        context_lens_tensor=torch.tensor([256], device='cuda:0', dtype=torch.int32),
+                        block_tables=block_tables[:batch_size],
+                        use_cuda_graph=True,
+                    )
+
+                    graph_runner = CUDAGraphRunner(
+                        self.model, self.attn_backend.get_name())
+
+                    capture_inputs = {
+                        "input_ids":
+                        input_tokens[:(num_tokens)],# plus dymme token for bonus token generation
+                        "positions":
+                        input_positions[:num_tokens],
+                        "hidden_or_intermediate_states":
+                        hidden_or_intermediate_states[
+                            virtual_engine]  # type: ignore
+                        [:batch_size]
+                        if hidden_or_intermediate_states[virtual_engine]
+                        is not None else None,
+                        "intermediate_inputs":
+                        intermediate_inputs[:batch_size]
+                        if intermediate_inputs is not None else None,
+                        "kv_caches":
+                        kv_caches[virtual_engine],
+                        "attn_metadata":
+                        attn_metadata,
+                        "memory_pool":
+                        self.graph_memory_pool,
+                        "stream":
+                        graph_capture_context.stream
+                    }
+                    graph_runner.capture(**capture_inputs)
+                    self.graph_memory_pool = graph_runner.graph.pool() #TODO Do Not override decodeing cuda graph pool
+                    self.graph_runners_prefill[virtual_engine][batch_size] = (
+                        graph_runner)
+                    logger.info(f"Graph captured for prefill {virtual_engine=}")
+                    
+
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
@@ -1524,6 +1591,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
+        elif prefill_meta is not None and prefill_meta.num_prefill_tokens==3:
+            prefill_meta.use_cuda_graph=True
+            assert model_input.input_tokens is not None
+            graph_batch_size = 1# model_input.input_tokens.shape[0]
+            model_executable = self.graph_runners_prefill[virtual_engine][
+                graph_batch_size]
+        
         else:
             model_executable = self.model
 
@@ -1707,14 +1781,21 @@ class CUDAGraphRunner:
                 **kwargs,
             }
         else:
+            if attn_metadata.decode_metadata:
+                seq_lens_tensor=attn_metadata.decode_metadata.seq_lens_tensor  
+                block_tables=attn_metadata.decode_metadata.block_tables
+            else:
+                seq_lens_tensor=attn_metadata.prefill_metadata.seq_lens_tensor
+                block_tables=attn_metadata.prefill_metadata.block_tables
+
             self.input_buffers = {
                 "input_ids": input_ids,
                 "positions": positions,
                 "kv_caches": kv_caches,
                 "slot_mapping": attn_metadata.slot_mapping,
-                "seq_lens_tensor":
-                attn_metadata.decode_metadata.seq_lens_tensor,
-                "block_tables": attn_metadata.decode_metadata.block_tables,
+                "seq_lens_tensor":seq_lens_tensor
+                ,
+                "block_tables": block_tables,
                 **kwargs,
             }
         if intermediate_inputs is not None:
@@ -1746,10 +1827,11 @@ class CUDAGraphRunner:
                                                  non_blocking=True)
         if self.backend_name != "flashinfer":
             self.input_buffers["seq_lens_tensor"].copy_(
-                attn_metadata.decode_metadata.seq_lens_tensor,
+                attn_metadata.seq_lens_tensor, #TODO attn_metadata.decode_metadata
                 non_blocking=True)
             self.input_buffers["block_tables"].copy_(
-                attn_metadata.decode_metadata.block_tables, non_blocking=True)
+                attn_metadata.block_tables,  #TODO attn_metadata.decode_metadata
+                non_blocking=True)
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
