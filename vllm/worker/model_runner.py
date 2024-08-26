@@ -642,7 +642,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def _use_captured_graph(self, batch_size: int,
                             max_decode_seq_len: int) -> bool:
         #TODO dirty hack
-        if (not self.decode_only) and (max_decode_seq_len==0) and (batch_size==3):
+        if (not self.decode_only) and (max_decode_seq_len==0) and (batch_size==1):
             return True
         return (self.decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
@@ -686,7 +686,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for data in self.inter_data_list
         }
 
-        batch_size = len(input_tokens)
+        batch_size = len(seq_lens)
+
         use_captured_graph = self._use_captured_graph(batch_size,
                                                       max_decode_seq_len)
 
@@ -1409,12 +1410,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     attn_metadata = self.attn_backend.make_metadata(
                         num_prefills=batch_size,
-                        num_prefill_tokens=num_tokens+1,
+                        num_prefill_tokens=num_tokens,
                         num_decode_tokens=0,
-                        slot_mapping=slot_mapping[:num_tokens+1],
-                        seq_lens=[self.max_seq_len_to_capture,1] * batch_size,
-                        seq_lens_tensor=seq_lens[:(batch_size+1)],
-                        max_query_len=self.max_seq_len_to_capture,
+                        slot_mapping=slot_mapping[:num_tokens],
+                        seq_lens=[self.max_seq_len_to_capture] * batch_size,
+                        seq_lens_tensor=seq_lens[:batch_size],
+                        max_query_len=num_prefill_tokens,
                         max_prefill_seq_len=self.max_seq_len_to_capture,
                         max_decode_seq_len=0,
                         query_start_loc=torch.tensor([0, 3], device='cuda:0', dtype=torch.int32), 
@@ -1429,9 +1430,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     capture_inputs = {
                         "input_ids":
-                        input_tokens[:(num_tokens+1)],# plus dymme token for bonus token generation
+                        input_tokens[:num_tokens],
                         "positions":
-                        input_positions[:(num_tokens+1)],
+                        input_positions[:num_tokens],
                         "hidden_or_intermediate_states":
                         hidden_or_intermediate_states[
                             virtual_engine]  # type: ignore
@@ -1843,9 +1844,6 @@ class CUDAGraphRunner:
                 block_tables,
                 non_blocking=True)
             
-            if False:#not attn_metadata.decode_metadata:
-                print(f"{self.input_buffers=}")
-
         if "seqlen_agnostic_capture_inputs" in self.input_buffers:
             self.model.copy_inputs_before_cuda_graphs(self.input_buffers,
                                                       **kwargs)
