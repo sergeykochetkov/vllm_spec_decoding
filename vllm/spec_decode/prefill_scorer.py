@@ -99,7 +99,7 @@ class PrefillTop1Scorer(SpeculativeScorer):
         
         #all_probs[batch_indices, torch.arange(all_tokens.size(1)), all_tokens] = 1.0
         for b in range(batch_size):
-            for token_position in range(len(all_tokens)):
+            for token_position in range(len(all_tokens[b])):
                 for t in all_tokens:
                     all_probs[b,token_position,t]=1.0
 

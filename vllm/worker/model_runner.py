@@ -642,7 +642,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
     def _use_captured_graph(self, batch_size: int,
                             max_decode_seq_len: int) -> bool:
         #TODO dirty hack
-        if (not self.decode_only) and (max_decode_seq_len==0) and (batch_size==1):
+        if False: #(not self.decode_only) and (max_decode_seq_len==0) and (batch_size in [1,8]):
             return True
         return (self.decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
@@ -1404,7 +1404,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             # memory usage of CUDA graph.
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
-                for batch_size in [1]:
+                for batch_size in [1, 8]:
                     num_prefill_tokens = 3
                     num_tokens = batch_size * num_prefill_tokens
 
@@ -1418,9 +1418,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         max_query_len=num_prefill_tokens,
                         max_prefill_seq_len=self.max_seq_len_to_capture,
                         max_decode_seq_len=0,
-                        query_start_loc=torch.tensor([0, 3], device='cuda:0', dtype=torch.int32), 
-                        seq_start_loc=torch.tensor([  0, 259], device='cuda:0', dtype=torch.int32), 
-                        context_lens_tensor=torch.tensor([256], device='cuda:0', dtype=torch.int32),
+                        query_start_loc=torch.tensor([0]+[num_prefill_tokens]*batch_size, device='cuda:0', dtype=torch.int32), 
+                        seq_start_loc=torch.tensor([  0] + [259]*batch_size, device='cuda:0', dtype=torch.int32), 
+                        context_lens_tensor=torch.tensor([256]*batch_size, device='cuda:0', dtype=torch.int32),
                         block_tables=block_tables[:batch_size],
                         use_cuda_graph=True,
                     )
@@ -1593,10 +1593,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
-        elif prefill_meta is not None and prefill_meta.num_prefill_tokens==3:
+        elif prefill_meta is not None and prefill_meta.num_prefill_tokens in [3, 24]:
             prefill_meta.use_cuda_graph=True
             assert model_input.input_tokens is not None
-            graph_batch_size = 1# model_input.input_tokens.shape[0]
+            #TODO hack
+            graph_batch_size = prefill_meta.num_prefill_tokens // 3# model_input.input_tokens.shape[0]
             model_executable = self.graph_runners_prefill[virtual_engine][
                 graph_batch_size]
         
