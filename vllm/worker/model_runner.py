@@ -641,8 +641,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
     def _use_captured_graph(self, batch_size: int,
                             max_decode_seq_len: int) -> bool:
-        #TODO dirty hack
-        if False: #(not self.decode_only) and (max_decode_seq_len==0) and (batch_size in [1,8]):
+        #TODO dirty hack, here batch_size = len(input_tokens)
+        if (not self.decode_only) and (max_decode_seq_len==0) and (batch_size in [8*3]):
             return True
         return (self.decode_only and not self.runner.model_config.enforce_eager
                 and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
@@ -686,10 +686,17 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             for data in self.inter_data_list
         }
 
-        batch_size = len(seq_lens)
+        
+        #batch_size = len(seq_lens)
+        batch_size = len(input_tokens)
 
         use_captured_graph = self._use_captured_graph(batch_size,
                                                       max_decode_seq_len)
+        
+        #TODO hack: in case of prefill batch_size - is the number of sequences, in case of decode - the number of decode tokens
+        if use_captured_graph:
+            if batch_size==24:
+                batch_size=len(seq_lens)
 
         # If cuda graph can be used, pad tensors accordingly.
         # See `capture_model` API for more details.
@@ -1593,7 +1600,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = self.graph_runners[virtual_engine][
                 graph_batch_size]
-        elif prefill_meta is not None and prefill_meta.num_prefill_tokens in [3, 24]:
+        elif prefill_meta is not None and prefill_meta.num_prefill_tokens==24:
             prefill_meta.use_cuda_graph=True
             assert model_input.input_tokens is not None
             #TODO hack

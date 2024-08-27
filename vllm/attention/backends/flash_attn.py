@@ -454,8 +454,9 @@ class FlashAttentionMetadataBuilder(
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
             # TODO not shure
-            #num_decode_tokens = batch_size 
-
+            if max_decode_seq_len!=0: # True in case of decode
+                num_decode_tokens = batch_size 
+            
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.runner.graph_block_tables[:batch_size]
