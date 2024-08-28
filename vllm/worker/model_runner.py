@@ -1425,8 +1425,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         max_query_len=num_prefill_tokens,
                         max_prefill_seq_len=self.max_seq_len_to_capture,
                         max_decode_seq_len=0,
-                        query_start_loc=torch.tensor([0]+[num_prefill_tokens]*batch_size, device='cuda:0', dtype=torch.int32), 
-                        seq_start_loc=torch.tensor([  0] + [259]*batch_size, device='cuda:0', dtype=torch.int32), 
+                        query_start_loc=torch.arange(0, num_tokens+1, num_prefill_tokens, device='cuda:0', dtype=torch.int32),
+                        
+                        seq_start_loc=torch.arange(0, batch_size*259+1, 259, device='cuda:0', dtype=torch.int32),
+                        
                         context_lens_tensor=torch.tensor([256]*batch_size, device='cuda:0', dtype=torch.int32),
                         block_tables=block_tables[:batch_size],
                         use_cuda_graph=True,

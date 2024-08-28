@@ -47,7 +47,8 @@ def main(args: argparse.Namespace):
         distributed_executor_backend=args.distributed_executor_backend,
         otlp_traces_endpoint=args.otlp_traces_endpoint,
         enable_prefix_caching=args.enable_prefix_caching,
-        disable_log_stats=False
+        #disable_log_stats=False
+        max_seq_len_to_capture=1024
     )
 
     sampling_params = SamplingParams(
