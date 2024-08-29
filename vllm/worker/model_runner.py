@@ -1265,6 +1265,32 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                                dtype=torch.int32,
                                                device=self.device)
 
+
+        prefill_attn_metadata={}        
+        for batch_size in [1, 8]:
+            num_prefill_tokens = 3
+            num_tokens = batch_size * num_prefill_tokens
+
+            attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=batch_size,
+                num_prefill_tokens=num_tokens,
+                num_decode_tokens=0,
+                slot_mapping=slot_mapping[:num_tokens],
+                seq_lens=[self.max_seq_len_to_capture] * batch_size,
+                seq_lens_tensor=seq_lens[:batch_size],
+                max_query_len=num_prefill_tokens,
+                max_prefill_seq_len=self.max_seq_len_to_capture,
+                max_decode_seq_len=0,
+                query_start_loc=torch.arange(0, num_tokens+1, num_prefill_tokens, dtype=torch.int32).cuda(),
+                
+                seq_start_loc=torch.arange(0, batch_size*259+1, 259, dtype=torch.int32).cuda(),
+                
+                context_lens_tensor=torch.tensor([256]*batch_size, dtype=torch.int32).cuda(),
+                block_tables=block_tables[:batch_size],
+                use_cuda_graph=True,
+            )
+            prefill_attn_metadata[batch_size]=attn_metadata
+
         with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
@@ -1407,6 +1433,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_runners[virtual_engine][batch_size] = (
                         graph_runner)
             
+        #with graph_capture() as graph_capture_context:
+            #self.graph_memory_pool=None
                         # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for virtual_engine in range(
@@ -1415,24 +1443,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     num_prefill_tokens = 3
                     num_tokens = batch_size * num_prefill_tokens
 
-                    attn_metadata = self.attn_backend.make_metadata(
-                        num_prefills=batch_size,
-                        num_prefill_tokens=num_tokens,
-                        num_decode_tokens=0,
-                        slot_mapping=slot_mapping[:num_tokens],
-                        seq_lens=[self.max_seq_len_to_capture] * batch_size,
-                        seq_lens_tensor=seq_lens[:batch_size],
-                        max_query_len=num_prefill_tokens,
-                        max_prefill_seq_len=self.max_seq_len_to_capture,
-                        max_decode_seq_len=0,
-                        query_start_loc=torch.arange(0, num_tokens+1, num_prefill_tokens, device='cuda:0', dtype=torch.int32),
-                        
-                        seq_start_loc=torch.arange(0, batch_size*259+1, 259, device='cuda:0', dtype=torch.int32),
-                        
-                        context_lens_tensor=torch.tensor([256]*batch_size, device='cuda:0', dtype=torch.int32),
-                        block_tables=block_tables[:batch_size],
-                        use_cuda_graph=True,
-                    )
+                    attn_metadata = prefill_attn_metadata[batch_size]
 
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name())
@@ -1460,7 +1471,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         "stream":
                         graph_capture_context.stream
                     }
-                    print(f"{capture_inputs=}")
+                    
                     graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool() #TODO Do Not override decodeing cuda graph pool
                     self.graph_runners_prefill[virtual_engine][batch_size] = (
@@ -1796,9 +1807,18 @@ class CUDAGraphRunner:
             if attn_metadata.decode_metadata:
                 seq_lens_tensor=attn_metadata.decode_metadata.seq_lens_tensor  
                 block_tables=attn_metadata.decode_metadata.block_tables
+                prefill_buffers = {}
             else:
                 seq_lens_tensor=attn_metadata.prefill_metadata.seq_lens_tensor
                 block_tables=attn_metadata.prefill_metadata.block_tables
+
+                prefill_buffers = {
+                    "query_start_loc": attn_metadata.prefill_metadata.query_start_loc,
+                    "seq_start_loc": attn_metadata.prefill_metadata.seq_start_loc,
+                    "context_lens_tensor": attn_metadata.prefill_metadata.context_lens_tensor
+                }
+
+                
 
             self.input_buffers = {
                 "input_ids": input_ids,
@@ -1808,6 +1828,7 @@ class CUDAGraphRunner:
                 "seq_lens_tensor":seq_lens_tensor
                 ,
                 "block_tables": block_tables,
+                **prefill_buffers,
                 **kwargs,
             }
         if intermediate_inputs is not None:
@@ -1846,6 +1867,15 @@ class CUDAGraphRunner:
             else:
                 seq_lens_tensor=attn_metadata.prefill_metadata.seq_lens_tensor
                 block_tables=attn_metadata.prefill_metadata.block_tables
+                prefill_buffers = {
+                    "query_start_loc": attn_metadata.prefill_metadata.query_start_loc,
+                    "seq_start_loc": attn_metadata.prefill_metadata.seq_start_loc,
+                    "context_lens_tensor": attn_metadata.prefill_metadata.context_lens_tensor
+                }
+
+                for k,v in prefill_buffers.items():
+                    self.input_buffers[k].copy_(v, non_blocking=True)
+
 
             self.input_buffers["seq_lens_tensor"].copy_(
                 seq_lens_tensor, 
